@@ -1,0 +1,109 @@
+#define FUSE_USE_VERSION 31
+
+#include <fuse.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <limits.h>
+
+const char *log_directory = "/var/log"; // Directory to expose through FUSE
+
+// Helper function to construct full paths
+void construct_path(char *full_path, const char *path) {
+    snprintf(full_path, PATH_MAX, "%s%s", log_directory, path);
+}
+
+// Get file or directory attributes
+static int caramel_getattr(const char *path, struct stat *stbuf) {
+    memset(stbuf, 0, sizeof(struct stat));
+
+    char full_path[PATH_MAX];
+    construct_path(full_path, path);
+
+    if (strcmp(path, "/") == 0) { // Root directory
+        stbuf->st_mode = S_IFDIR | 0755;
+        stbuf->st_nlink = 2;
+    } else {
+        // Get attributes for the real file
+        if (stat(full_path, stbuf) == -1) {
+            return -errno;
+        }
+    }
+    return 0;
+}
+
+// Read directory contents
+static int caramel_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+                           off_t offset, struct fuse_file_info *fi) {
+    (void) offset;
+    (void) fi;
+
+    if (strcmp(path, "/") != 0) {
+        return -ENOENT; // Only root directory is supported
+    }
+
+    DIR *dp = opendir(log_directory);
+    if (dp == NULL) {
+        return -errno;
+    }
+
+    // Correct the number of arguments passed to filler
+    filler(buf, ".", NULL, 0); // Current directory
+    filler(buf, "..", NULL, 0); // Parent directory
+
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        filler(buf, de->d_name, NULL, 0); // Add each file to the FUSE directory
+    }
+
+    closedir(dp);
+    return 0;
+}
+
+// Open file
+static int caramel_open(const char *path, struct fuse_file_info *fi) {
+    char full_path[PATH_MAX];
+    construct_path(full_path, path);
+
+    int res = open(full_path, fi->flags);
+    if (res == -1) {
+        return -errno;
+    }
+    close(res); // Close the file after verifying it can be opened
+    return 0;
+}
+
+// Read file contents
+static int caramel_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
+    char full_path[PATH_MAX];
+    construct_path(full_path, path);
+
+    int fd = open(full_path, O_RDONLY);
+    if (fd == -1) {
+        return -errno;
+    }
+
+    int res = pread(fd, buf, size, offset);
+    if (res == -1) {
+        res = -errno;
+    }
+
+    close(fd);
+    return res;
+}
+
+// FUSE operations structure
+static struct fuse_operations caramel_oper = {
+    .getattr = caramel_getattr,
+    .readdir = caramel_readdir,
+    .open = caramel_open,
+    .read = caramel_read,
+};
+
+int main(int argc, char *argv[]) {
+    return fuse_main(argc, argv, &caramel_oper, NULL);
+}
